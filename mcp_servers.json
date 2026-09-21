@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "banxico": {
+      "command": "~/Documents/mcp-banxico/.venv/bin/python",
+      "args": [
+        "-c",
+        "from mcp_banxico.cli import main; main()"
+      ],
+      "env": {
+        "PYTHONPATH": "~/Documents/mcp-banxico"
+      },
+      "enabled": true,
+      "description": "Servidor MCP oficial de Banxico (Dólar FIX, Inflación, UDIS, Tasas TIIE)"
+    },
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@latest"
+      ],
+      "enabled": true,
+      "description": "Automatización y navegación web con Playwright (navegación, clics, interacción, snapshots)"
+    }
+  }
+}

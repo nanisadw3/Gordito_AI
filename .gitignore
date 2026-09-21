@@ -1,0 +1,24 @@
+# Environment variables (credentials, API keys)
+.env
+*.env
+
+# Python virtual environment & cache
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# OS & Editor artifacts
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+CarpetaNueva/
+
+# Playwright / test artifacts
+test-results/
+playwright-report/
