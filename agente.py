@@ -7,54 +7,69 @@ Agente de IA local con acceso al Sistema, Internet en vivo, Control de Spotify y
 import os
 import sys
 
-_VENV = os.path.expanduser("~/Documents/agente/.venv/bin/python3")
+_DIR = os.path.dirname(os.path.abspath(__file__))
+_VENV = os.path.join(_DIR, "venv/bin/python3")
+if not os.path.exists(_VENV):
+    _VENV = os.path.join(_DIR, ".venv/bin/python3")
+if not os.path.exists(_VENV):
+    _VENV = os.path.expanduser("~/Documents/agente/.venv/bin/python3")
+
 if sys.prefix == sys.base_prefix and os.path.exists(_VENV):
     os.execv(_VENV, [_VENV] + sys.argv)
+import asyncio
 import csv
 import json
-import asyncio
 import subprocess
-from datetime import datetime
 from contextlib import AsyncExitStack
-from typing import Dict, Any, List
+from datetime import datetime
+from typing import Any
 
 import httpx
+from core import (
+    LOCAL_TOOL_FUNCTIONS,
+    ejecutar_mision_autonoma,
+    ejecutar_modo_flow,
+    enrutar_herramientas_para_consulta,
+    extraer_tool_calls_fallback,
+    imprimir_banner_gordito,
+    inferir_llamada_banxico_fallback,
+    inferir_llamada_busqueda_fallback,
+    SyntheticToolCall,
+    generar_prompt_sintesis,
+    modelo_soporta_tools,
+    mostrar_tabla_herramientas,
+    normalizar_nombre_herramienta,
+    obtener_modelos_instalados,
+    obtener_nombre_os,
+    obtener_system_prompt_gordito,
+    renderizar_streaming_panel,
+)
 from ddgs import DDGS
-
-import ollama
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 from ollama import AsyncClient
-
-from rich.console import Console
-from rich.panel import Panel
-from rich.json import JSON
-from rich.table import Table
-
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.styles import Style
-
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-from core import (
-    imprimir_banner_gordito,
-    SYSTEM_PROMPT_GORDITO,
-    renderizar_respuesta_gordito,
-    renderizar_streaming_panel,
-    ejecutar_mision_autonoma,
-    ejecutar_modo_flow,
-    obtener_nombre_os,
-    mostrar_tabla_herramientas,
-)
+from rich.console import Console
+from rich.json import JSON
+from rich.panel import Panel
+from rich.table import Table
 
 console = Console()
 
-CONFIG_MCP_PATH = os.path.expanduser("~/Documents/agente/mcp_servers.json")
+CONFIG_MCP_PATH = os.path.join(_DIR, "mcp_servers.json")
+if not os.path.exists(CONFIG_MCP_PATH):
+    CONFIG_MCP_PATH = os.path.expanduser("~/Documents/agente/mcp_servers.json")
+
 SPOTIFY_CSV_PATH = os.path.expanduser("~/Documents/Mi-Spotify-/favoritos.csv")
 
 # Cargar variables de entorno locales si existen
-DOTENV_PATH = os.path.expanduser("~/Documents/agente/.env")
+DOTENV_PATH = os.path.join(_DIR, ".env")
+if not os.path.exists(DOTENV_PATH):
+    DOTENV_PATH = os.path.expanduser("~/Documents/agente/.env")
 if os.path.exists(DOTENV_PATH):
     try:
         with open(DOTENV_PATH, "r", encoding="utf-8") as f:
@@ -77,7 +92,7 @@ def cambiar_directorio(ruta: str) -> str:
         os.chdir(ruta_exp)
         return f"Directorio de trabajo cambiado exitosamente a: {os.getcwd()}"
     except Exception as e:
-        return f"Error al cambiar de directorio: {str(e)}"
+        return f"Error al cambiar de directorio: {e!s}"
 
 def ejecutar_comando(comando: str) -> str:
     """Ejecuta un comando en la terminal bash/zsh y devuelve la salida estándar o errores."""
@@ -109,7 +124,7 @@ def ejecutar_comando(comando: str) -> str:
     except subprocess.TimeoutExpired:
         return "Error: El comando tardó demasiado y expiró (timeout de 30s)."
     except Exception as e:
-        return f"Error ejecutando comando: {str(e)}"
+        return f"Error ejecutando comando: {e!s}"
 
 def listar_archivos(ruta: str = ".") -> str:
     """Lista los archivos y carpetas en una ruta específica. Por defecto '.' para la carpeta actual."""
@@ -125,7 +140,7 @@ def listar_archivos(ruta: str = ".") -> str:
             info.append(f"{tipo}: {item}")
         return "\n".join(info)
     except Exception as e:
-        return f"Error al listar archivos: {str(e)}"
+        return f"Error al listar archivos: {e!s}"
 
 def leer_archivo(ruta: str) -> str:
     """Lee y devuelve el contenido de un archivo de texto."""
@@ -135,7 +150,7 @@ def leer_archivo(ruta: str) -> str:
             contenido = f.read()
         return contenido if contenido else "(Archivo vacío)"
     except Exception as e:
-        return f"Error al leer archivo: {str(e)}"
+        return f"Error al leer archivo: {e!s}"
 
 def escribir_archivo(ruta: str, contenido: str) -> str:
     """Crea o sobreescribe un archivo de texto con el contenido especificado."""
@@ -146,7 +161,7 @@ def escribir_archivo(ruta: str, contenido: str) -> str:
             f.write(contenido)
         return f"Archivo '{ruta}' guardado correctamente ({len(contenido)} caracteres)."
     except Exception as e:
-        return f"Error al escribir archivo: {str(e)}"
+        return f"Error al escribir archivo: {e!s}"
 
 def info_sistema() -> str:
     """Devuelve la fecha/hora actual, usuario, sistema operativo y directorio de trabajo."""
@@ -161,13 +176,24 @@ def info_sistema() -> str:
 # 2. Herramientas de Internet (Búsqueda y Navegación)
 # ==========================================
 
-def buscar_en_internet(consulta: str, max_resultados: int = 5) -> str:
+def buscar_en_internet(consulta: str = "", max_resultados: int = 5, **kwargs) -> str:
     """Busca en internet en tiempo real usando DuckDuckGo y devuelve títulos, fragmentos y enlaces."""
+    q = consulta or kwargs.get("query") or kwargs.get("q") or kwargs.get("busqueda") or kwargs.get("search") or kwargs.get("text") or kwargs.get("prompt") or ""
+    limite = kwargs.get("max_results") or kwargs.get("limit") or kwargs.get("num_results") or max_resultados
+    try:
+        limite = int(limite)
+    except (ValueError, TypeError):
+        limite = 5
+
+    q = str(q).strip()
+    if not q:
+        return "Error: No se especificó término de búsqueda."
+
     try:
         with DDGS() as ddgs:
-            resultados = list(ddgs.text(consulta, max_results=max_resultados))
+            resultados = list(ddgs.text(q, max_results=limite))
             if not resultados:
-                return f"No se encontraron resultados en la web para: '{consulta}'."
+                return f"No se encontraron resultados en la web para: '{q}'."
             
             lineas = []
             for i, r in enumerate(resultados, 1):
@@ -177,14 +203,18 @@ def buscar_en_internet(consulta: str, max_resultados: int = 5) -> str:
                 lineas.append(f"{i}. {titulo}\n   URL: {enlace}\n   Fragmento: {cuerpo}")
             return "\n\n".join(lineas)
     except Exception as e:
-        return f"Error al buscar en internet: {str(e)}"
+        return f"Error al buscar en internet: {e!s}"
 
-def leer_pagina_web(url: str) -> str:
+def leer_pagina_web(url: str = "", **kwargs) -> str:
     """Descarga una página web y devuelve su contenido de texto limpio (sin etiquetas HTML)."""
+    u = url or kwargs.get("link") or kwargs.get("uri") or kwargs.get("target") or kwargs.get("href") or kwargs.get("page_url") or ""
+    u = str(u).strip()
+    if not u:
+        return "Error: No se especificó la URL de la página web a leer."
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
         with httpx.Client(follow_redirects=True, timeout=15.0) as client:
-            resp = client.get(url, headers=headers)
+            resp = client.get(u, headers=headers)
             resp.raise_for_status()
             
             # Limpieza básica de HTML
@@ -199,7 +229,7 @@ def leer_pagina_web(url: str) -> str:
                 texto = texto[:3000] + "... [Contenido truncado]"
             return texto if texto else "No se pudo extraer texto de la página."
     except Exception as e:
-        return f"Error al leer página web {url}: {str(e)}"
+        return f"Error al leer página web {url}: {e!s}"
 
 # ==========================================
 # 3. Herramientas de Spotify (macOS & Mi-Spotify-)
@@ -227,7 +257,7 @@ def spotify_estado() -> str:
         salida = res.stdout.strip()
         return salida if salida else "No se obtuvo respuesta de Spotify."
     except Exception as e:
-        return f"Error al consultar Spotify: {str(e)}"
+        return f"Error al consultar Spotify: {e!s}"
 
 def spotify_control(accion: str) -> str:
     """Controla la reproducción de Spotify en tu Mac. Acciones válidas: 'play', 'pause', 'toggle', 'siguiente' (next), 'anterior' (prev), 'subir_volumen', 'bajar_volumen'."""
@@ -263,7 +293,7 @@ def spotify_control(accion: str) -> str:
         res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
         return res.stdout.strip() or f"Acción '{accion}' completada."
     except Exception as e:
-        return f"Error al controlar Spotify: {str(e)}"
+        return f"Error al controlar Spotify: {e!s}"
 
 def spotify_reproducir(nombre_o_uri: str) -> str:
     """Reproduce una canción, artista, álbum o enlace/URI específico en la aplicación Spotify de tu Mac."""
@@ -284,7 +314,7 @@ def spotify_reproducir(nombre_o_uri: str) -> str:
             subprocess.run(["osascript", "-e", 'tell application "Spotify" to play'], capture_output=True, text=True)
         return f"Reproduciendo '{target}' en Spotify."
     except Exception as e:
-        return f"Error al reproducir en Spotify: {str(e)}"
+        return f"Error al reproducir en Spotify: {e!s}"
 
 def spotify_mis_favoritos(filtro: str = "") -> str:
     """Consulta la lista de canciones favoritas sincronizadas en tu proyecto ~/Documents/Mi-Spotify-/favoritos.csv."""
@@ -316,7 +346,7 @@ def spotify_mis_favoritos(filtro: str = "") -> str:
             res += f"\n\n... y {total - 15} canciones más en tu biblioteca ({total} en total)."
         return res
     except Exception as e:
-        return f"Error al leer favoritos.csv: {str(e)}"
+        return f"Error al leer favoritos.csv: {e!s}"
 
 # Registro consolidado de funciones locales
 LOCAL_TOOL_FUNCTIONS = {
@@ -342,9 +372,9 @@ class MCPManager:
     def __init__(self, config_path: str):
         self.config_path = config_path
         self.exit_stack = AsyncExitStack()
-        self.sessions: Dict[str, ClientSession] = {}
-        self.mcp_tools: Dict[str, tuple] = {}
-        self.servers_info: Dict[str, dict] = {}
+        self.sessions: dict[str, ClientSession] = {}
+        self.mcp_tools: dict[str, tuple] = {}
+        self.servers_info: dict[str, dict] = {}
 
     def cargar_configuracion(self) -> dict:
         if not os.path.exists(self.config_path):
@@ -418,9 +448,9 @@ class MCPManager:
                     salidas.append(str(content))
             return "\n".join(salidas) if salidas else "Herramienta ejecutada sin salida."
         except Exception as e:
-            return f"Error en herramienta MCP {tool_name}: {str(e)}"
+            return f"Error en herramienta MCP {tool_name}: {e!s}"
 
-    def obtener_esquemas_ollama(self) -> List[dict]:
+    def obtener_esquemas_ollama(self) -> list[dict]:
         esquemas = []
         for name, (_, t) in self.mcp_tools.items():
             schema = t.input_schema if hasattr(t, "input_schema") else {"type": "object", "properties": {}}
@@ -497,12 +527,6 @@ PROMPT_STYLE = Style.from_dict({
 })
 
 
-def obtener_modelos_instalados():
-    try:
-        modelos_info = ollama.list()
-        return [m for m in modelos_info.models if "embed" not in m.model]
-    except Exception:
-        return []
 
 
 def comando_help():
@@ -539,7 +563,7 @@ def comando_spotify():
     ))
 
 
-def obtener_todas_las_herramientas(mcp_mgr: MCPManager) -> List[Any]:
+def obtener_todas_las_herramientas(mcp_mgr: MCPManager) -> list[Any]:
     herramientas = list(LOCAL_TOOL_FUNCTIONS.values())
     esquemas_mcp = mcp_mgr.obtener_esquemas_ollama()
     herramientas.extend(esquemas_mcp)
@@ -554,9 +578,15 @@ async def ejecutar_agente_loop(
     modo_debug: bool = True
 ) -> str:
     paso = 1
-    todas_las_herramientas = obtener_todas_las_herramientas(mcp_mgr)
+    max_pasos = 8
+    ultimo_mensaje_user = ""
+    for m in reversed(mensajes):
+        if m.get("role") == "user":
+            ultimo_mensaje_user = m.get("content", "")
+            break
+    todas_las_herramientas = enrutar_herramientas_para_consulta(ultimo_mensaje_user, mcp_mgr)
 
-    while True:
+    while paso <= max_pasos:
         with console.status(f"[bold cyan]Gordito ({modelo}) pensando...[/bold cyan]", spinner="dots"):
             respuesta = await cliente_ollama.chat(
                 model=modelo,
@@ -572,16 +602,42 @@ async def ejecutar_agente_loop(
         if thinking_content:
             console.print(Panel(
                 thinking_content.strip(),
-                title=f"[bold magenta]🧠 Razonamiento de Gordito (Chain of Thought)[/bold magenta]",
+                title="[bold magenta]🧠 Razonamiento de Gordito (Chain of Thought)[/bold magenta]",
                 border_style="magenta",
                 subtitle="Gordito analiza la petición y elige las herramientas necesarias"
             ))
 
-        if not mensaje_modelo.tool_calls:
+        tool_calls = list(mensaje_modelo.tool_calls) if mensaje_modelo.tool_calls else []
+        if not tool_calls:
+            valid_names = set(LOCAL_TOOL_FUNCTIONS.keys()) | set(mcp_mgr.mcp_tools.keys())
+            fallback_calls = extraer_tool_calls_fallback(mensaje_modelo.content or "", valid_names)
+            if fallback_calls:
+                tool_calls = fallback_calls
+                mensaje_modelo.tool_calls = [
+                    {"function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                    for tc in fallback_calls
+                ]
+
+        if not tool_calls and paso == 1:
+            fn_name, fn_args = inferir_llamada_banxico_fallback(ultimo_mensaje_user)
+            if not fn_name:
+                fn_name, fn_args = inferir_llamada_busqueda_fallback(ultimo_mensaje_user)
+
+            if fn_name and (fn_name in mcp_mgr.mcp_tools or fn_name in LOCAL_TOOL_FUNCTIONS):
+                tool_calls = [SyntheticToolCall(fn_name, fn_args)]
+                mensaje_modelo.tool_calls = [
+                    {"function": {"name": fn_name, "arguments": fn_args}}
+                ]
+
+        if not tool_calls:
             return mensaje_modelo.content or "(Respuesta vacía)"
 
-        for tool_call in mensaje_modelo.tool_calls:
-            nombre_funcion = tool_call.function.name
+        mensaje_modelo.content = ""
+
+        herramientas_ejecutadas: list[str] = []
+        for tool_call in tool_calls:
+            nombre_funcion = normalizar_nombre_herramienta(tool_call.function.name)
+            herramientas_ejecutadas.append(nombre_funcion)
             argumentos = tool_call.function.arguments or {}
 
             if modo_debug:
@@ -659,6 +715,21 @@ async def ejecutar_agente_loop(
             mensajes.append(payload_retorno)
             paso += 1
 
+        prompt_sintesis = generar_prompt_sintesis(ultimo_mensaje_user, herramientas_ejecutadas)
+        mensajes_sintesis = list(mensajes) + [{
+            "role": "user",
+            "content": prompt_sintesis
+        }]
+        with console.status(f"[bold cyan]Gordito ({modelo}) sintetizando respuesta...[/bold cyan]", spinner="dots"):
+            resp_sintesis = await cliente_ollama.chat(
+                model=modelo,
+                messages=mensajes_sintesis,
+            )
+        mensajes.append(resp_sintesis.message)
+        return resp_sintesis.message.content or "Operación completada."
+
+    return "Operación completada."
+
 
 async def main_async():
     cliente_ollama = AsyncClient()
@@ -669,21 +740,28 @@ async def main_async():
 
     total_mcp = len(mcp_mgr.mcp_tools)
 
-    modelos = obtener_modelos_instalados()
+    modelos = obtener_modelos_instalados(solo_con_tools=True)
     if not modelos:
-        nombres = ["gemma4:e4b", "llama3.1:latest"]
+        console.print("[bold red]⚠ Advertencia:[/bold red] No se detectaron modelos con soporte de herramientas (tools) en Ollama.")
+        todos = obtener_modelos_instalados(solo_con_tools=False)
+        nombres = [m.model for m in todos] if todos else ["qwen2.5-coder:7b"]
     else:
         nombres = [m.model for m in modelos]
 
-    modelo_actual = "gemma4:e4b" if "gemma4:e4b" in nombres else ("llama3.1:latest" if "llama3.1:latest" in nombres else nombres[0])
+    modelo_actual = "qwen2.5-coder:7b" if "qwen2.5-coder:7b" in nombres else (nombres[0] if nombres else "qwen2.5-coder:7b")
     modo_debug = True
 
     # Banner visual con Tux Linux
-    imprimir_banner_gordito(modelo_actual, total_mcp=total_mcp, subtitulo="Modo Inspector")
+    imprimir_banner_gordito(
+        modelo_actual,
+        total_mcp=total_mcp,
+        subtitulo="Modo Inspector",
+        servidores_activos=list(mcp_mgr.sessions.keys())
+    )
 
-    mensajes = [{"role": "system", "content": SYSTEM_PROMPT_GORDITO}]
+    mensajes = [{"role": "system", "content": obtener_system_prompt_gordito()}]
 
-    completer = SlashCompleter(lambda: [m.model for m in obtener_modelos_instalados()])
+    completer = SlashCompleter(lambda: [m.model for m in obtener_modelos_instalados(solo_con_tools=True)])
     session = PromptSession(
         completer=completer,
         complete_while_typing=True,
@@ -751,7 +829,7 @@ async def main_async():
                     continue
 
                 elif cmd in ["/clear", "/reset"]:
-                    mensajes = [{"role": "system", "content": system_prompt}]
+                    mensajes = [{"role": "system", "content": obtener_system_prompt_gordito()}]
                     console.print("[italic cyan]🧹 Memoria reiniciada.[/italic cyan]\n")
                     continue
 
@@ -766,8 +844,11 @@ async def main_async():
                     continue
 
                 elif cmd == "/models":
-                    modelos_inst = [m.model for m in obtener_modelos_instalados()]
-                    tabla = Table(title="🤖 Modelos Disponibles en Ollama", border_style="bright_blue")
+                    modelos_inst = [m.model for m in obtener_modelos_instalados(solo_con_tools=True)]
+                    if not modelos_inst:
+                        console.print("[red]No se encontraron modelos con soporte de herramientas en Ollama.[/red]\n")
+                        continue
+                    tabla = Table(title="🤖 Modelos Disponibles con Soporte de Herramientas (Tools)", border_style="bright_blue")
                     tabla.add_column("Nombre", style="bold cyan")
                     tabla.add_column("Activo", justify="center")
                     for m in modelos_inst:
@@ -775,23 +856,48 @@ async def main_async():
                         tabla.add_row(m, activo)
                     console.print(tabla)
                     sel = await session.prompt_async(HTML(f"<b>Elige modelo (Enter para {modelo_actual}): </b>"), default=modelo_actual)
-                    if sel.strip() in modelos_inst:
-                        modelo_actual = sel.strip()
+                    sel_clean = sel.strip()
+                    if sel_clean in modelos_inst:
+                        modelo_actual = sel_clean
                         console.print(f"[bold green]Cambiado a {modelo_actual}[/bold green]\n")
+                    elif sel_clean and sel_clean != modelo_actual:
+                        console.print(f"[red]Error:[/red] '{sel_clean}' no soporta herramientas o no existe.\n")
                     continue
 
                 elif cmd == "/model":
-                    modelos_inst = [m.model for m in obtener_modelos_instalados()]
-                    if arg in modelos_inst:
+                    modelos_inst = [m.model for m in obtener_modelos_instalados(solo_con_tools=True)]
+                    if not arg:
+                        console.print(f"\n[bold cyan]Modelo actual:[/bold cyan] [green]{modelo_actual}[/green]")
+                        console.print("[bold cyan]Modelos disponibles con soporte de herramientas (tools):[/bold cyan]")
+                        for m in modelos_inst:
+                            marca = " [green]← activo[/green]" if m == modelo_actual else ""
+                            console.print(f"  • {m}{marca}")
+                        console.print("[dim]Uso: /model <nombre_modelo>[/dim]\n")
+                    elif arg in modelos_inst:
                         modelo_actual = arg
                         console.print(f"[bold green]Modelo cambiado a: {modelo_actual}[/bold green]\n")
                     else:
-                        console.print(f"[red]Modelo '{arg}' no encontrado.[/red]\n")
+                        if modelo_soporta_tools(arg):
+                            modelo_actual = arg
+                            console.print(f"[bold green]Modelo cambiado a: {modelo_actual}[/bold green]\n")
+                        else:
+                            console.print(f"[bold red]Error:[/bold red] El modelo '{arg}' no soporta herramientas (tools) en Ollama o no está instalado.")
+                            console.print(f"[dim]Modelos compatibles disponibles: {', '.join(modelos_inst)}[/dim]\n")
                     continue
 
                 else:
                     console.print(f"[red]Comando desconocido: {cmd}. Escribe /help.[/red]\n")
-                    continue
+            # Detección inteligente de consultas sobre herramientas
+            texto_norm = texto.lower().replace("?", "").replace("¿", "").strip()
+            es_pregunta_tools = any(p in texto_norm for p in [
+                "que tools", "que herramientas", "cuales tools", "cuales herramientas",
+                "tus tools", "tus herramientas", "mis tools", "ver tools", "ver herramientas",
+                "lista de tools", "lista de herramientas", "listar tools", "listar herramientas"
+            ]) or ("tools" in texto_norm and any(w in texto_norm for w in ["conectad", "activ", "disponib", "tien", "toen"]))
+
+            if es_pregunta_tools:
+                mostrar_tabla_herramientas(mcp_mgr, console)
+                continue
 
             # Turno normal de conversación con Gordito
             mensajes.append({"role": "user", "content": texto})

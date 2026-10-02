@@ -22,3 +22,7 @@ CarpetaNueva/
 # Playwright / test artifacts
 test-results/
 playwright-report/
+.playwright-mcp/
+
+# Local user configuration
+tools_config.json

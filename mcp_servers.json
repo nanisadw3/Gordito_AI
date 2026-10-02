@@ -1,21 +1,18 @@
 {
   "mcpServers": {
     "banxico": {
-      "command": "~/Documents/mcp-banxico/.venv/bin/python",
+      "command": "~/.local/bin/uvx",
       "args": [
-        "-c",
-        "from mcp_banxico.cli import main; main()"
+        "mcp-banxico@0.1.3"
       ],
-      "env": {
-        "PYTHONPATH": "~/Documents/mcp-banxico"
-      },
       "enabled": true,
-      "description": "Servidor MCP oficial de Banxico (Dólar FIX, Inflación, UDIS, Tasas TIIE)"
+      "description": "Datos economicos oficiales de Banxico: dolar FIX, inflacion INPC, UDIS, TIIE, tasa objetivo y reserva internacional. El token se toma de BANXICO_TOKEN en .env"
     },
     "playwright": {
       "command": "npx",
       "args": [
         "-y",
+        "--silent",
         "@playwright/mcp@latest"
       ],
       "enabled": true,
