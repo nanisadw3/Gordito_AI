@@ -1423,21 +1423,25 @@ def inferir_llamada_banxico_fallback(texto_usuario: str) -> tuple[str | None, di
 
 
 def _area_de_la_pregunta(txt: str) -> str | None:
-    """Área geográfica al final de la pregunta: "... vive en Monterrey?" -> "Monterrey"."""
-    m = re.search(r"\b(?:en|de|tiene)\s+(?:el\s+|la\s+)?([a-z0-9 ,.]+?)\s*[?¿!.]*$", txt)
-    if not m:
-        return None
-    area = m.group(1).strip(" ,.")
-    # Varios lugares ("cdmx, jalisco y nuevo leon") no son un área: eso es para comparar_areas.
-    if " y " in f" {area} " or area.count(",") > 1:
-        return None
-    # "en mexico" / "del pais" = nacional: se deja que el servidor use su valor por defecto.
-    if area in ("mexico", "el pais", "pais", "todo mexico", "la republica"):
-        return None
-    # Evita tomar como área el propio indicador ("la tasa de desempleo").
-    if any(k in area for k in ("desempleo", "desocupacion", "poblacion", "habitantes", "pib")):
-        return None
-    return area
+    """Área geográfica de la pregunta: "... vive en Monterrey?" -> "monterrey".
+
+    Se prueba cada "en" / "de" / "tiene" de izquierda a derecha: en "la tasa de desempleo en
+    Jalisco" el primer "de" lleva al indicador, no al lugar; el "en" siguiente, sí.
+    """
+    indicadores = ("desempleo", "desocupacion", "poblacion", "habitantes", "pib", "mujeres",
+                   "hombres", "gente", "personas", "tasa", "inflacion")
+    for m in re.finditer(r"\b(?:en|de|del|tiene)\s+(?:el\s+|la\s+)?", txt):
+        area = txt[m.end():].strip(" ¿?!.,")
+        if not area or any(k in area for k in indicadores):
+            continue
+        # Varios lugares ("cdmx, jalisco y nuevo leon") no son un área: eso es para comparar_areas.
+        if " y " in f" {area} " or area.count(",") > 1:
+            return None
+        # "en mexico" / "del pais" = nacional: se deja que el servidor use su valor por defecto.
+        if area in ("mexico", "el pais", "pais", "todo mexico", "la republica"):
+            return None
+        return area
+    return None
 
 
 def inferir_llamada_inegi_fallback(texto_usuario: str) -> tuple[str | None, dict]:
