@@ -21,7 +21,7 @@
     "inegi": {
       "command": "~/.local/bin/uvx",
       "args": [
-        "mcp-inegi@0.2.0"
+        "mcp-inegi@0.2.1"
       ],
       "enabled": true,
       "description": "Datos oficiales del INEGI: población, inflación, empleo, PIB e IGAE por país, estado o municipio, y el DENUE (directorio de negocios: contar, buscar y encontrar cercanos). Los tokens se toman de INEGI_TOKEN y DENUE_TOKEN en .env"
