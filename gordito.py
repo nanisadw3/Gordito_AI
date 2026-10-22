@@ -25,6 +25,7 @@ from core import (
     INEGI_TOOLS,
     area_mencionada,
     giro_mencionado,
+    responder_capacidades_mcp,
     componer_respuesta_inegi,
     RESPUESTA_CREADOR,
     MCPManager,
@@ -213,6 +214,11 @@ async def ejecutar_turno_minimal(
         if m.get("role") == "user":
             ultimo_mensaje_user = m.get("content", "")
             break
+
+    capacidades = responder_capacidades_mcp(ultimo_mensaje_user, mcp_mgr)
+    if capacidades:
+        mensajes.append({"role": "assistant", "content": capacidades})
+        return capacidades
 
     es_charla = es_saludo_o_charla(ultimo_mensaje_user)
     herramientas_disponibles = [] if es_charla else enrutar_herramientas_para_consulta(ultimo_mensaje_user, mcp_mgr)

@@ -1455,6 +1455,8 @@ def inferir_llamada_inegi_fallback(texto_usuario: str) -> tuple[str | None, dict
     txt = texto_usuario.lower()
     for a, b in [("á", "a"), ("é", "e"), ("í", "i"), ("ó", "o"), ("ú", "u"), ("ñ", "n")]:
         txt = txt.replace(a, b)
+    # Erratas frecuentes al escribir rápido: "cuandos", "cuantos", "cuantas" -> "cuantos/as".
+    txt = re.sub(r"\bcuan[dt]?([oa])s\b", r"cuant\1s", txt)
 
     reglas = [
         (["desempleo", "desocupacion", "desempleados", "desocupados"], "TASA_DESOCUPACION"),
@@ -1568,6 +1570,63 @@ def componer_respuesta_inegi(resultados: list[str]) -> str | None:
         else:
             return None
     return "\n".join(partes) if partes else None
+
+
+# Ejemplos que se muestran cuando preguntan qué puede hacer un servidor MCP de datos.
+_EJEMPLOS_MCP = {
+    "inegi": [
+        "¿Cuántas mujeres viven en Naucalpan?",
+        "¿Cómo está el desempleo en Jalisco?",
+        "Compara la población de CDMX, Jalisco y Nuevo León",
+        "¿Cuántas tortillerías hay en Naucalpan?",
+        "Busca farmacias en Coyoacán",
+    ],
+    "banxico": [
+        "¿Cuánto está el dólar hoy?",
+        "¿Cuál es la inflación anual?",
+        "¿Cuánto vale la UDI?",
+    ],
+}
+
+
+def responder_capacidades_mcp(texto_usuario: str, mcp_mgr: "MCPManager") -> str | None:
+    """
+    Contesta "¿qué puedes hacer con el MCP de INEGI?" con las herramientas que de verdad están
+    conectadas. Sin esto, el modelo chico inventa qué es "MCP" (llegó a decir "Método
+    Comunaleño de Proyección").
+    """
+    txt = (texto_usuario or "").lower()
+    for a, b in [("á", "a"), ("é", "e"), ("í", "i"), ("ó", "o"), ("ú", "u"), ("ñ", "n")]:
+        txt = txt.replace(a, b)
+    pregunta = any(k in txt for k in [
+        "que informacion", "que puedes", "que sabes", "que haces", "que hace", "para que sirve",
+        "que herramientas", "que datos", "que me puedes", "que ofrece", "que tiene",
+    ])
+    servidor = next((s for s in ("inegi", "banxico") if s in txt or (s == "inegi" and "denue" in txt)), None)
+    if not pregunta or not servidor:
+        return None
+    if servidor not in mcp_mgr.sessions:
+        return (f"El servidor MCP de {servidor.upper()} no está conectado ahora. "
+                f"Actívalo con /config on {servidor}.")
+
+    if servidor == "inegi":
+        nombres = sorted(INEGI_TOOLS & set(mcp_mgr.mcp_tools))
+    else:
+        nombres = sorted(n for n in mcp_mgr.mcp_tools if any(
+            k in n for k in ["tipo_cambio", "banxico", "inflacion", "udis", "tasa", "reservas", "sie"]))
+    lineas = [
+        f"El **MCP de {servidor.upper()}** es un servidor del Model Context Protocol (MCP) del "
+        f"proyecto Itzamná que me conecta con los datos oficiales de "
+        f"{'INEGI (indicadores y el directorio de negocios DENUE)' if servidor == 'inegi' else 'Banxico'}. "
+        f"Tengo {len(nombres)} herramientas:",
+    ]
+    for n in nombres:
+        _, herramienta = mcp_mgr.mcp_tools[n]
+        desc = (getattr(herramienta, "description", "") or "").strip().splitlines()
+        lineas.append(f"- **{n}**: {desc[0] if desc else ''}")
+    lineas.append("\nPrueba con:")
+    lineas += [f"- {ej}" for ej in _EJEMPLOS_MCP[servidor]]
+    return "\n".join(lineas)
 
 
 def inferir_llamada_busqueda_fallback(texto_usuario: str) -> tuple[str | None, dict]:
