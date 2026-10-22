@@ -97,7 +97,8 @@ def es_saludo_o_charla(texto: str) -> bool:
 RESPUESTA_CREADOR = (
     "Mi creador es **Iñaki Sobera Sotomayor** 🐧.\n\n"
     "Él me programó y diseñó para ser tu asistente personal de inteligencia artificial en Arch Linux, "
-    "integrándome con herramientas de sistema, DJ de Spotify, búsqueda web y datos económicos oficiales de Banxico."
+    "integrándome con herramientas de sistema, DJ de Spotify, búsqueda web y datos oficiales de México "
+    "(Banxico e INEGI, del proyecto Itzamná)."
 )
 
 def es_pregunta_creador(texto: str) -> bool:
@@ -175,6 +176,14 @@ def guardar_config_tools(config: dict) -> bool:
     except Exception:
         return False
 
+# Herramientas que expone mcp-inegi: sus nombres no llevan prefijo, así que se agrupan aquí.
+INEGI_TOOLS = {
+    "indicadores_clave", "consultar_indicador", "comparar_areas", "buscar_municipio",
+    "metadatos_indicador", "buscar_actividad", "contar_negocios", "buscar_negocios",
+    "negocios_cercanos",
+}
+
+
 def herramienta_esta_habilitada(nombre_herramienta: str) -> bool:
     """Verifica si una herramienta específica o su categoría/prefijo está habilitada."""
     cfg = cargar_config_tools()
@@ -194,6 +203,8 @@ def herramienta_esta_habilitada(nombre_herramienta: str) -> bool:
         if dl in ["banxico"] and ("banxico" in nom_l or nom_l in ["tipo_cambio_usd", "inflacion_mexico", "valor_udis", "tasa_interes_banxico", "reservas_internacionales", "consultar_serie_sie"]):
             return False
         if dl in ["spotify"] and (nom_l.startswith("spotify_") or nom_l == "dj_de_codigo"):
+            return False
+        if dl == "inegi" and nom_l in INEGI_TOOLS:
             return False
     return True
 
@@ -216,6 +227,8 @@ def alternar_herramienta(objetivo: str, activar: bool = None) -> tuple[bool, str
         "browser": "playwright",
         "navegador": "playwright",
         "banxico": "banxico",
+        "inegi": "inegi",
+        "denue": "inegi",
         "spotify": "spotify",
         "musica": "spotify",
         "web": "buscar_en_internet",
@@ -1256,6 +1269,16 @@ def enrutar_herramientas_para_consulta(texto_usuario: str, mcp_mgr: MCPManager) 
         "banxico", "banco de mexico", "sie"
     ])
 
+    es_inegi = any(k in txt for k in [
+        "inegi", "denue", "poblacion", "habitantes", "cuanta gente", "cuantas personas", "censo",
+        "desempleo", "desocupacion", "desocupados", "empleo", "pib", "producto interno",
+        "igae", "actividad economica", "indigena", "extranjero", "municipio", "alcaldia",
+        "negocio", "establecimiento", "tortilleria", "farmacia", "restaurante", "cafeteria",
+        "gimnasio", "dentista", "ferreteria", "papeleria", "abarrotes", "oxxo", "cuantas hay",
+        "cuantos hay", "cerca de", "cercanos", "cercanas", "alrededor de", "scian",
+        "inflacion subyacente", "indicador",
+    ])
+
     es_spotify = any(k in txt for k in [
         "spotify", "cancion", "musica", "dj", "flow", "reproduce", "play",
         "pausa", "volumen", "artista", "playlist", "favoritos", "tema", "pista"
@@ -1275,6 +1298,26 @@ def enrutar_herramientas_para_consulta(texto_usuario: str, mcp_mgr: MCPManager) 
     es_busqueda = any(k in txt for k in [
         "buscar", "busca", "busqueda", "google", "internet", "intenret", "duckduckgo", "web"
     ])
+
+    def _nombre_herramienta(h) -> str:
+        if callable(h):
+            return getattr(h, "__name__", "")
+        if isinstance(h, dict) and "function" in h:
+            return h["function"].get("name", "")
+        return ""
+
+    # INEGI (indicadores y negocios del DENUE). Si también menciona temas de Banxico
+    # ("inflación en Jalisco y el dólar"), se mandan las dos familias, nunca el navegador.
+    if es_inegi and not es_browser:
+        herramientas_filtradas = [h for h in todas if _nombre_herramienta(h) in INEGI_TOOLS]
+        if es_banxico:
+            herramientas_filtradas += [
+                h for h in todas if any(k in _nombre_herramienta(h) for k in [
+                    "tipo_cambio", "banxico", "inflacion", "udis", "tasa", "reservas", "sie"
+                ])
+            ]
+        if herramientas_filtradas:
+            return herramientas_filtradas
 
     # Regla de oro: Para Banxico / economía mexicana, NUNCA enviar herramientas del navegador
     if es_banxico and not es_browser:

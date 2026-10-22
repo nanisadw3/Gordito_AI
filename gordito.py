@@ -22,6 +22,7 @@ import json
 from core import (
     CONFIG_MCP_PATH,
     LOCAL_TOOL_FUNCTIONS,
+    INEGI_TOOLS,
     RESPUESTA_CREADOR,
     MCPManager,
     alternar_herramienta,
@@ -105,6 +106,8 @@ class MinimalCompleter(Completer):
                 ("on playwright", "Activar navegador Playwright MCP"),
                 ("off banxico", "Desactivar consultas económicas Banxico MCP"),
                 ("on banxico", "Activar consultas económicas Banxico MCP"),
+                ("off inegi", "Desactivar INEGI MCP (indicadores y DENUE)"),
+                ("on inegi", "Activar INEGI MCP (indicadores y DENUE)"),
                 ("off spotify", "Desactivar controles de Spotify"),
                 ("on spotify", "Activar controles de Spotify"),
                 ("off buscar_en_internet", "Desactivar búsqueda DuckDuckGo"),
@@ -170,6 +173,8 @@ def describir_accion_herramienta(nombre: str, args: dict) -> str:
         return f"[bold magenta][SYS_EXEC][/bold magenta] Exec: [dim]${args.get('comando', '')}[/dim]"
     elif nombre == "info_sistema":
         return "[bold magenta][SYS_INFO][/bold magenta] Querying host clock & system..."
+    elif nombre in INEGI_TOOLS:
+        return f"[bold cyan][MCP_RPC][/bold cyan] INEGI: [italic]{nombre}[/italic]"
     elif any(k in nombre for k in ["tipo_cambio", "banxico", "inflacion", "udis", "tasa", "reserva", "sie"]):
         return f"[bold cyan][MCP_RPC][/bold cyan] Banxico: [italic]{nombre}[/italic]"
     elif nombre.startswith("browser_"):
@@ -358,6 +363,7 @@ async def menu_config_interactivo(mcp_mgr: MCPManager, console: Console):
     items = [
         {"id": "playwright", "titulo": "🎭 Playwright MCP (Navegador Web)", "desc": "Automatización y navegación web completa (browser_*)", "tipo": "modulo"},
         {"id": "banxico", "titulo": "🏛️ Banxico MCP (Datos Oficiales México)", "desc": "Tipo de cambio FIX, inflación INPC, UDIS, TIIE, reservas", "tipo": "modulo"},
+        {"id": "inegi", "titulo": "📊 INEGI MCP (Indicadores y DENUE)", "desc": "Población, inflación, empleo, PIB, IGAE y directorio de negocios", "tipo": "modulo"},
         {"id": "spotify", "titulo": "🎧 Spotify & DJ de Código", "desc": "Control de música, DJ inteligente y favoritos", "tipo": "modulo"},
         {"id": "buscar_en_internet", "titulo": "🌐 DuckDuckGo (Búsqueda Web)", "desc": "Búsqueda en tiempo real en la web", "tipo": "tool"},
         {"id": "leer_pagina_web", "titulo": "📄 Lector de Páginas Web", "desc": "Descarga y lectura del texto de páginas web", "tipo": "tool"},
@@ -372,7 +378,7 @@ async def menu_config_interactivo(mcp_mgr: MCPManager, console: Console):
     # Servidores MCP adicionales detectados que no estén en la lista previa
     conocidos_ids = {it["id"] for it in items}
     for srv_name, srv_info in mcp_mgr.servers_info.items():
-        if srv_name not in conocidos_ids and srv_name not in ["playwright", "banxico"]:
+        if srv_name not in conocidos_ids and srv_name not in ["playwright", "banxico", "inegi"]:
             items.append({
                 "id": srv_name,
                 "titulo": f"🔌 {srv_name.capitalize()} MCP",
@@ -501,10 +507,11 @@ async def menu_config_interactivo(mcp_mgr: MCPManager, console: Console):
         elif "playwright" not in nuevas_deshabilitadas and "playwright" not in mcp_mgr.sessions:
             await mcp_mgr.conectar_servidor("playwright")
 
-        if "banxico" in nuevas_deshabilitadas and "banxico" in mcp_mgr.sessions:
-            await mcp_mgr.desconectar_servidor("banxico")
-        elif "banxico" not in nuevas_deshabilitadas and "banxico" not in mcp_mgr.sessions:
-            await mcp_mgr.conectar_servidor("banxico")
+        for modulo in MODULOS_MCP_DATOS:
+            if modulo in nuevas_deshabilitadas and modulo in mcp_mgr.sessions:
+                await mcp_mgr.desconectar_servidor(modulo)
+            elif modulo not in nuevas_deshabilitadas and modulo not in mcp_mgr.sessions:
+                await mcp_mgr.conectar_servidor(modulo)
 
         console.print("\n[bold green]✓ Configuración actualizada y guardada exitosamente en tools_config.json[/bold green]")
         if nuevas_deshabilitadas:
@@ -513,6 +520,15 @@ async def menu_config_interactivo(mcp_mgr: MCPManager, console: Console):
             console.print("[dim]Todas las herramientas y módulos están [bold green]ACTIVADOS (ON)[/bold green].[/dim]\n")
     else:
         console.print("\n[dim]Configuración sin cambios.[/dim]\n")
+
+
+# Servidores MCP de datos de México (Itzamná) que se prenden y apagan con /config.
+MODULOS_MCP_DATOS = ("banxico", "inegi")
+_ALIAS_MODULOS = {"banxico": "banxico", "inegi": "inegi", "denue": "inegi"}
+
+
+def _modulo_datos(nombre: str) -> str | None:
+    return _ALIAS_MODULOS.get(nombre.strip().lower())
 
 
 async def comando_config_clean(mcp_mgr: MCPManager, arg: str = ""):
@@ -538,8 +554,8 @@ async def comando_config_clean(mcp_mgr: MCPManager, arg: str = ""):
         _, msg = alternar_herramienta(resto, activar=False)
         if resto.lower() in ["playwright", "browser"] and "playwright" in mcp_mgr.sessions:
             await mcp_mgr.desconectar_servidor("playwright")
-        elif resto.lower() == "banxico" and "banxico" in mcp_mgr.sessions:
-            await mcp_mgr.desconectar_servidor("banxico")
+        elif _modulo_datos(resto) in mcp_mgr.sessions:
+            await mcp_mgr.desconectar_servidor(_modulo_datos(resto))
         console.print(f"\n  {msg}\n")
     elif sub in ["on", "enable", "prender", "activar"]:
         if not resto:
@@ -548,8 +564,8 @@ async def comando_config_clean(mcp_mgr: MCPManager, arg: str = ""):
         _, msg = alternar_herramienta(resto, activar=True)
         if resto.lower() in ["playwright", "browser"] and "playwright" not in mcp_mgr.sessions:
             await mcp_mgr.conectar_servidor("playwright")
-        elif resto.lower() == "banxico" and "banxico" not in mcp_mgr.sessions:
-            await mcp_mgr.conectar_servidor("banxico")
+        elif _modulo_datos(resto) and _modulo_datos(resto) not in mcp_mgr.sessions:
+            await mcp_mgr.conectar_servidor(_modulo_datos(resto))
         console.print(f"\n  {msg}\n")
     elif sub in ["toggle", "switch"]:
         if not resto:
@@ -561,11 +577,12 @@ async def comando_config_clean(mcp_mgr: MCPManager, arg: str = ""):
                 await mcp_mgr.desconectar_servidor("playwright")
             elif nuevo_st and "playwright" not in mcp_mgr.sessions:
                 await mcp_mgr.conectar_servidor("playwright")
-        elif resto.lower() == "banxico":
-            if not nuevo_st and "banxico" in mcp_mgr.sessions:
-                await mcp_mgr.desconectar_servidor("banxico")
-            elif nuevo_st and "banxico" not in mcp_mgr.sessions:
-                await mcp_mgr.conectar_servidor("banxico")
+        elif _modulo_datos(resto):
+            modulo = _modulo_datos(resto)
+            if not nuevo_st and modulo in mcp_mgr.sessions:
+                await mcp_mgr.desconectar_servidor(modulo)
+            elif nuevo_st and modulo not in mcp_mgr.sessions:
+                await mcp_mgr.conectar_servidor(modulo)
         console.print(f"\n  {msg}\n")
     else:
         # Por defecto, alternar lo que el usuario escribió si no especificó on/off
@@ -575,11 +592,12 @@ async def comando_config_clean(mcp_mgr: MCPManager, arg: str = ""):
                 await mcp_mgr.desconectar_servidor("playwright")
             elif nuevo_st and "playwright" not in mcp_mgr.sessions:
                 await mcp_mgr.conectar_servidor("playwright")
-        elif arg_clean.lower() == "banxico":
-            if not nuevo_st and "banxico" in mcp_mgr.sessions:
-                await mcp_mgr.desconectar_servidor("banxico")
-            elif nuevo_st and "banxico" not in mcp_mgr.sessions:
-                await mcp_mgr.conectar_servidor("banxico")
+        elif _modulo_datos(arg_clean):
+            modulo = _modulo_datos(arg_clean)
+            if not nuevo_st and modulo in mcp_mgr.sessions:
+                await mcp_mgr.desconectar_servidor(modulo)
+            elif nuevo_st and modulo not in mcp_mgr.sessions:
+                await mcp_mgr.conectar_servidor(modulo)
         console.print(f"\n  {msg}\n")
 
 
