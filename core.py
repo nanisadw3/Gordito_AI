@@ -1522,6 +1522,54 @@ def giro_mencionado(texto_usuario: str) -> str | None:
     return m.group(1).strip() if m else None
 
 
+def _normalizar_simple(texto: str) -> str:
+    t = (texto or "").lower()
+    for a, b in [("á", "a"), ("é", "e"), ("í", "i"), ("ó", "o"), ("ú", "u"), ("ñ", "n")]:
+        t = t.replace(a, b)
+    return t
+
+
+def corregir_actividad(args: dict, texto_usuario: str) -> dict:
+    """
+    El modelo chico a veces inventa el giro: a "¿cuántos oxxos hay en Naucalpan?" le pasó
+    "farmacias" o el código "464110". Si lo que mandó no aparece en la pregunta, se usa el giro
+    que sí escribió la persona.
+    """
+    actividad = str(args.get("actividad") or "").strip()
+    if not actividad:
+        return args
+    pregunta = _normalizar_simple(texto_usuario)
+    fn, inferidos = inferir_llamada_inegi_fallback(texto_usuario)
+    giro = inferidos.get("actividad") if fn in ("contar_negocios", "buscar_negocios") else None
+    if not giro:
+        return args
+    palabras = re.findall(r"\w+", _normalizar_simple(actividad))
+    aparece = any(w[:5] in pregunta for w in palabras if len(w) >= 3 and not w.isdigit())
+    if aparece or (actividad.isdigit() and actividad in pregunta):
+        return args
+    return {**args, "actividad": giro}
+
+
+def corregir_area(args: dict, texto_usuario: str) -> dict:
+    """
+    Igual que con el giro: el modelo llegó a mandar el área "<clave del municipio>". Si el área
+    que manda no aparece en la pregunta y la pregunta sí menciona un lugar, se usa ese lugar.
+    """
+    area = str(args.get("area") or "").strip()
+    if not area:
+        return args
+    mencionada = area_mencionada(texto_usuario)
+    if not mencionada:
+        return args
+    pregunta = _normalizar_simple(texto_usuario)
+    palabras = [w for w in re.findall(r"\w+", _normalizar_simple(area)) if len(w) >= 3]
+    if "<" not in area and palabras and any(w[:5] in pregunta for w in palabras):
+        return args
+    if area.isdigit() and area in pregunta:
+        return args
+    return {**args, "area": mencionada}
+
+
 def componer_respuesta_inegi(resultados: list[str]) -> str | None:
     """
     Arma la respuesta final directo de lo que devolvió mcp-inegi, sin pasar por el modelo.
@@ -1532,17 +1580,18 @@ def componer_respuesta_inegi(resultados: list[str]) -> str | None:
     puede componer, y entonces responde el modelo como siempre.
     """
     partes: list[str] = []
+    errores: list[str] = []
     for crudo in resultados:
         texto = str(crudo).strip()
         if texto.startswith("Error"):
-            partes.append(texto)
+            errores.append(texto)
             continue
         try:
             datos = json.loads(texto)
         except (ValueError, TypeError):
-            return None
+            continue
         if not isinstance(datos, dict):
-            return None
+            continue
         if datos.get("resumen"):
             partes.append(datos["resumen"])
             for n in (datos.get("negocios") or [])[:5]:
@@ -1567,9 +1616,12 @@ def componer_respuesta_inegi(resultados: list[str]) -> str | None:
                     valor = r.get("valor")
                     valor_txt = f"{valor:,}" if isinstance(valor, (int, float)) else str(valor)
                     partes.append(f"- {area}: {valor_txt} ({r.get('periodo')})")
-        else:
-            return None
-    return "\n".join(partes) if partes else None
+        # Herramientas auxiliares (buscar_actividad, buscar_municipio…) no traen resumen: si el
+        # modelo las llamó junto con la consulta real, se ignoran en vez de soltarle la
+        # redacción al modelo, que con ese contexto llegó a inventar cifras.
+    if partes:
+        return "\n".join(partes)
+    return "\n".join(errores) if errores else None
 
 
 # Ejemplos que se muestran cuando preguntan qué puede hacer un servidor MCP de datos.

@@ -24,6 +24,8 @@ from core import (
     LOCAL_TOOL_FUNCTIONS,
     INEGI_TOOLS,
     area_mencionada,
+    corregir_actividad,
+    corregir_area,
     giro_mencionado,
     responder_capacidades_mcp,
     componer_respuesta_inegi,
@@ -262,7 +264,15 @@ async def ejecutar_turno_minimal(
         if tool_calls and paso == 1 and "comparar_areas" in mcp_mgr.mcp_tools:
             fn_inf, args_inf = inferir_llamada_inegi_fallback(ultimo_mensaje_user)
             nombres_llamadas = {normalizar_nombre_herramienta(tc.function.name) for tc in tool_calls}
-            if fn_inf == "comparar_areas" and nombres_llamadas <= {"consultar_indicador"}:
+            # "¿Cuántos oxxos hay…?": si el modelo solo pidió el código SCIAN, se cuenta directo.
+            pidio_solo_codigo = nombres_llamadas <= {"buscar_actividad"}
+            # "¿Cuántos…?" se cuenta aunque el modelo haya pedido la lista de negocios.
+            pidio_lista_al_contar = fn_inf == "contar_negocios" and nombres_llamadas <= {
+                "buscar_actividad", "buscar_negocios"
+            }
+            if (fn_inf == "comparar_areas" and nombres_llamadas <= {"consultar_indicador"}) or (
+                fn_inf in ("contar_negocios", "buscar_negocios") and pidio_solo_codigo
+            ) or pidio_lista_al_contar:
                 tool_calls = [SyntheticToolCall(fn_inf, args_inf)]
                 mensaje_modelo.tool_calls = [{"function": {"name": fn_inf, "arguments": args_inf}}]
 
@@ -310,10 +320,14 @@ async def ejecutar_turno_minimal(
             herramientas_ejecutadas.append(nombre)
             args = tool_call.function.arguments or {}
             # Los modelos chicos a veces omiten el lugar ("habitantes de Jalisco" -> dato nacional).
+            if nombre in ("consultar_indicador", "contar_negocios", "buscar_negocios") and args.get("area"):
+                args = corregir_area(dict(args), ultimo_mensaje_user)
             if nombre in ("consultar_indicador", "contar_negocios", "buscar_negocios") and not args.get("area"):
                 area = area_mencionada(ultimo_mensaje_user)
                 if area:
                     args = {**dict(args), "area": area}
+            if nombre in ("contar_negocios", "buscar_negocios"):
+                args = corregir_actividad(dict(args), ultimo_mensaje_user)
             if nombre == "buscar_negocios" and not (args.get("que") or args.get("actividad")):
                 giro = giro_mencionado(ultimo_mensaje_user)
                 if giro:
@@ -358,9 +372,45 @@ async def ejecutar_turno_minimal(
         # reescriba (evita cifras, fuentes y negocios inventados).
         if herramientas_ejecutadas and all(h in INEGI_TOOLS for h in herramientas_ejecutadas):
             directa = componer_respuesta_inegi(resultados_ejecutados)
-            if directa:
+            solo_errores = bool(directa) and all(
+                linea.startswith("Error") for linea in directa.splitlines() if linea.strip()
+            )
+            if directa and not solo_errores:
                 mensajes.append({"role": "assistant", "content": directa})
                 return directa
+
+        # Red de seguridad: era una pregunta del INEGI pero no salió un resumen utilizable (el
+        # modelo llamó otra herramienta o una auxiliar). En vez de dejar que el modelo redacte
+        # la cifra —llegó a inventar "23 oxxos"—, se hace la consulta que se deduce de la pregunta.
+        era_inegi = any(h in INEGI_TOOLS for h in herramientas_ejecutadas) or (
+            herramientas_disponibles
+            and all(
+                (h.get("function", {}).get("name") if isinstance(h, dict) else getattr(h, "__name__", ""))
+                in INEGI_TOOLS
+                for h in herramientas_disponibles
+            )
+        )
+        if era_inegi:
+            fn_inf, args_inf = inferir_llamada_inegi_fallback(ultimo_mensaje_user)
+            if fn_inf and fn_inf in mcp_mgr.mcp_tools and herramienta_esta_habilitada(fn_inf):
+                console.print(f"  [bold green]⚡[/bold green] {describir_accion_herramienta(fn_inf, args_inf)}", end="")
+                try:
+                    resultado_inf = await mcp_mgr.ejecutar_herramienta(fn_inf, args_inf)
+                    console.print(" [green]✓[/green]")
+                except Exception as err:
+                    resultado_inf = f"Error: {err}"
+                    console.print(" [red]✗[/red]")
+                directa = componer_respuesta_inegi([resultado_inf])
+                if directa:
+                    mensajes.append({"role": "assistant", "content": directa})
+                    return directa
+        # Si no se pudo deducir nada mejor, el error del servidor es más honesto que una cifra
+        # redactada por el modelo.
+        if herramientas_ejecutadas and all(h in INEGI_TOOLS for h in herramientas_ejecutadas):
+            errores = componer_respuesta_inegi(resultados_ejecutados)
+            if errores:
+                mensajes.append({"role": "assistant", "content": errores})
+                return errores
 
         # Síntesis final de la respuesta tras ejecutar herramientas
         prompt_sintesis = generar_prompt_sintesis(ultimo_mensaje_user, herramientas_ejecutadas)
