@@ -23,6 +23,9 @@ from core import (
     CONFIG_MCP_PATH,
     LOCAL_TOOL_FUNCTIONS,
     INEGI_TOOLS,
+    area_mencionada,
+    giro_mencionado,
+    componer_respuesta_inegi,
     RESPUESTA_CREADOR,
     MCPManager,
     alternar_herramienta,
@@ -37,6 +40,7 @@ from core import (
     herramienta_esta_habilitada,
     imprimir_banner_gordito,
     inferir_llamada_banxico_fallback,
+    inferir_llamada_inegi_fallback,
     inferir_llamada_busqueda_fallback,
     SyntheticToolCall,
     modelo_soporta_tools,
@@ -247,9 +251,20 @@ async def ejecutar_turno_minimal(
                     for tc in fallback_calls
                 ]
 
+        # Comparaciones entre lugares: el modelo chico suele pedir un solo dato (nacional) en vez
+        # de comparar_areas; si la pregunta es claramente una comparación, se corrige la llamada.
+        if tool_calls and paso == 1 and "comparar_areas" in mcp_mgr.mcp_tools:
+            fn_inf, args_inf = inferir_llamada_inegi_fallback(ultimo_mensaje_user)
+            nombres_llamadas = {normalizar_nombre_herramienta(tc.function.name) for tc in tool_calls}
+            if fn_inf == "comparar_areas" and nombres_llamadas <= {"consultar_indicador"}:
+                tool_calls = [SyntheticToolCall(fn_inf, args_inf)]
+                mensaje_modelo.tool_calls = [{"function": {"name": fn_inf, "arguments": args_inf}}]
+
         # Inferencia determinista de respaldo si el modelo no emitió tool_calls pero la consulta es claramente una orden directa
         if not tool_calls and paso == 1:
-            fn_name, fn_args = inferir_llamada_banxico_fallback(ultimo_mensaje_user)
+            fn_name, fn_args = inferir_llamada_inegi_fallback(ultimo_mensaje_user)
+            if not fn_name or fn_name not in mcp_mgr.mcp_tools:
+                fn_name, fn_args = inferir_llamada_banxico_fallback(ultimo_mensaje_user)
             if not fn_name:
                 fn_name, fn_args = inferir_llamada_busqueda_fallback(ultimo_mensaje_user)
 
@@ -283,10 +298,20 @@ async def ejecutar_turno_minimal(
 
         # Ejecutar herramientas de forma compacta (una línea limpia por acción)
         herramientas_ejecutadas: list[str] = []
+        resultados_ejecutados: list[str] = []
         for tool_call in tool_calls:
             nombre = normalizar_nombre_herramienta(tool_call.function.name)
             herramientas_ejecutadas.append(nombre)
             args = tool_call.function.arguments or {}
+            # Los modelos chicos a veces omiten el lugar ("habitantes de Jalisco" -> dato nacional).
+            if nombre in ("consultar_indicador", "contar_negocios", "buscar_negocios") and not args.get("area"):
+                area = area_mencionada(ultimo_mensaje_user)
+                if area:
+                    args = {**dict(args), "area": area}
+            if nombre == "buscar_negocios" and not (args.get("que") or args.get("actividad")):
+                giro = giro_mencionado(ultimo_mensaje_user)
+                if giro:
+                    args = {**dict(args), "actividad": giro}
             descripcion = describir_accion_herramienta(nombre, args)
 
             # Indicador compacto hacker
@@ -321,6 +346,15 @@ async def ejecutar_turno_minimal(
                 "role": "tool",
                 "content": str(resultado)
             })
+            resultados_ejecutados.append(str(resultado))
+
+        # INEGI: la respuesta sale tal cual del "resumen" del servidor, sin que el modelo la
+        # reescriba (evita cifras, fuentes y negocios inventados).
+        if herramientas_ejecutadas and all(h in INEGI_TOOLS for h in herramientas_ejecutadas):
+            directa = componer_respuesta_inegi(resultados_ejecutados)
+            if directa:
+                mensajes.append({"role": "assistant", "content": directa})
+                return directa
 
         # Síntesis final de la respuesta tras ejecutar herramientas
         prompt_sintesis = generar_prompt_sintesis(ultimo_mensaje_user, herramientas_ejecutadas)

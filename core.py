@@ -1271,6 +1271,7 @@ def enrutar_herramientas_para_consulta(texto_usuario: str, mcp_mgr: MCPManager) 
 
     es_inegi = any(k in txt for k in [
         "inegi", "denue", "poblacion", "habitantes", "cuanta gente", "cuantas personas", "censo",
+        "mujeres", "hombres", "viven", "vive en", "gente en",
         "desempleo", "desocupacion", "desocupados", "empleo", "pib", "producto interno",
         "igae", "actividad economica", "indigena", "extranjero", "municipio", "alcaldia",
         "negocio", "establecimiento", "tortilleria", "farmacia", "restaurante", "cafeteria",
@@ -1421,6 +1422,149 @@ def inferir_llamada_banxico_fallback(texto_usuario: str) -> tuple[str | None, di
     return None, {}
 
 
+def _area_de_la_pregunta(txt: str) -> str | None:
+    """Área geográfica al final de la pregunta: "... vive en Monterrey?" -> "Monterrey"."""
+    m = re.search(r"\b(?:en|de|tiene)\s+(?:el\s+|la\s+)?([a-z0-9 ,.]+?)\s*[?¿!.]*$", txt)
+    if not m:
+        return None
+    area = m.group(1).strip(" ,.")
+    # Varios lugares ("cdmx, jalisco y nuevo leon") no son un área: eso es para comparar_areas.
+    if " y " in f" {area} " or area.count(",") > 1:
+        return None
+    # "en mexico" / "del pais" = nacional: se deja que el servidor use su valor por defecto.
+    if area in ("mexico", "el pais", "pais", "todo mexico", "la republica"):
+        return None
+    # Evita tomar como área el propio indicador ("la tasa de desempleo").
+    if any(k in area for k in ("desempleo", "desocupacion", "poblacion", "habitantes", "pib")):
+        return None
+    return area
+
+
+def inferir_llamada_inegi_fallback(texto_usuario: str) -> tuple[str | None, dict]:
+    """
+    Deduce la llamada al INEGI cuando el modelo local contesta de memoria en vez de usar la
+    herramienta (con qwen2.5-coder:7b llegó a inventar la tasa de desempleo). Solo cubre los
+    indicadores frecuentes; lo demás se queda con lo que decida el modelo.
+    """
+    if not texto_usuario:
+        return None, {}
+    txt = texto_usuario.lower()
+    for a, b in [("á", "a"), ("é", "e"), ("í", "i"), ("ó", "o"), ("ú", "u"), ("ñ", "n")]:
+        txt = txt.replace(a, b)
+
+    reglas = [
+        (["desempleo", "desocupacion", "desempleados", "desocupados"], "TASA_DESOCUPACION"),
+        (["mujeres"], "POBLACION_MUJERES"),
+        (["hombres"], "POBLACION_HOMBRES"),
+        (["indigena"], "POBLACION_INDIGENA_PCT"),
+        (["igae", "actividad economica"], "IGAE"),
+        (["pib", "producto interno"], "PIB_REAL"),
+        (["poblacion", "habitantes", "cuanta gente", "cuantas personas", "viven", "vive en"],
+         "POBLACION_TOTAL"),
+    ]
+    for palabras, indicador in reglas:
+        if any(p in txt for p in palabras):
+            # "compara la población de CDMX, Jalisco y Nuevo León" -> una sola llamada por áreas.
+            m = re.search(r"\bcompar\w*\b.*?\b(?:de|entre|en)\s+(.+?)\s*[?!.]*$", txt)
+            if m:
+                areas = [a.strip(" ,.") for a in re.split(r",|\s+y\s+|\s+vs\.?\s+", m.group(1))]
+                areas = [a for a in areas if a]
+                if len(areas) >= 2:
+                    return "comparar_areas", {"indicador": indicador, "areas": areas}
+            args = {"indicador": indicador}
+            area = _area_de_la_pregunta(txt)
+            # El desempleo, el PIB y el IGAE solo existen a nivel nacional.
+            if area and indicador not in ("TASA_DESOCUPACION", "PIB_REAL", "IGAE"):
+                args["area"] = area
+            return "consultar_indicador", args
+
+    # Negocios (DENUE): "¿cuántas tortillerías hay en X?" cuenta; "busca/dame X en Y" lista.
+    m = re.search(r"cuant[oa]s\s+(.+?)\s+hay(?:\s+en\s+(.+?))?\s*[?!.]*$", txt)
+    if m:
+        args = {"actividad": m.group(1).strip()}
+        area = m.group(2) and _area_de_la_pregunta(txt)
+        if area:
+            args["area"] = area
+        return "contar_negocios", args
+    giro = giro_mencionado(txt)
+    if giro:
+        args = {"actividad": giro}
+        area = _area_de_la_pregunta(txt)
+        if area:
+            args["area"] = area
+        return "buscar_negocios", args
+    return None, {}
+
+
+def area_mencionada(texto_usuario: str) -> str | None:
+    """Lugar mencionado en la pregunta ("¿cuántos habitantes tiene Jalisco?" -> "jalisco")."""
+    txt = (texto_usuario or "").lower()
+    for a, b in [("á", "a"), ("é", "e"), ("í", "i"), ("ó", "o"), ("ú", "u"), ("ñ", "n")]:
+        txt = txt.replace(a, b)
+    return _area_de_la_pregunta(txt)
+
+
+def giro_mencionado(texto_usuario: str) -> str | None:
+    """Giro de negocio en la pregunta ("busca farmacias en Coyoacán" -> "farmacias")."""
+    txt = (texto_usuario or "").lower().strip(" ¿?!.")
+    m = re.search(
+        r"\b(?:busca|buscar|buscame|encuentra|encuentrame|dame|muestrame|lista|hay)\s+"
+        r"(?:unas?\s+|unos?\s+|las?\s+|los?\s+)?(.+?)\s+(?:en|cerca|de|del)\b",
+        txt,
+    )
+    return m.group(1).strip() if m else None
+
+
+def componer_respuesta_inegi(resultados: list[str]) -> str | None:
+    """
+    Arma la respuesta final directo de lo que devolvió mcp-inegi, sin pasar por el modelo.
+
+    Con qwen2.5-coder:7b la síntesis cambiaba cifras (8.6 millones de Jalisco -> 13 millones),
+    inventaba fuentes y hasta negocios con dirección. El servidor ya manda un "resumen" con la
+    cifra, el periodo y la fuente; aquí solo se junta. Devuelve None si algún resultado no se
+    puede componer, y entonces responde el modelo como siempre.
+    """
+    partes: list[str] = []
+    for crudo in resultados:
+        texto = str(crudo).strip()
+        if texto.startswith("Error"):
+            partes.append(texto)
+            continue
+        try:
+            datos = json.loads(texto)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(datos, dict):
+            return None
+        if datos.get("resumen"):
+            partes.append(datos["resumen"])
+            for n in (datos.get("negocios") or [])[:5]:
+                linea = f"- **{n.get('nombre', 'Sin nombre')}**"
+                if n.get("direccion"):
+                    linea += f" — {n['direccion']}"
+                if n.get("distancia_m") is not None:
+                    linea += f" ({n['distancia_m']} m)"
+                if n.get("telefono"):
+                    linea += f" · Tel. {n['telefono']}"
+                partes.append(linea)
+            if len(datos.get("negocios") or []) > 5:
+                partes.append(f"…y {len(datos['negocios']) - 5} más.")
+        elif "resultados" in datos and datos.get("nombre"):
+            # comparar_areas: una línea por área.
+            partes.append(f"{datos['nombre']} ({datos.get('fuente') or 'INEGI'}):")
+            for r in datos["resultados"]:
+                area = (r.get("area") or {}).get("nombre") if isinstance(r.get("area"), dict) else r.get("area")
+                if "error" in r:
+                    partes.append(f"- {area}: sin dato")
+                else:
+                    valor = r.get("valor")
+                    valor_txt = f"{valor:,}" if isinstance(valor, (int, float)) else str(valor)
+                    partes.append(f"- {area}: {valor_txt} ({r.get('periodo')})")
+        else:
+            return None
+    return "\n".join(partes) if partes else None
+
+
 def inferir_llamada_busqueda_fallback(texto_usuario: str) -> tuple[str | None, dict]:
     """
     Deduce si el usuario pidió explícitamente buscar en internet y extrae la consulta
@@ -1483,13 +1627,27 @@ Tienes acceso a herramientas poderosas:
    - `tasa_interes_banxico`: TIIE a 28 días y tasa objetivo de política monetaria.
    - `reservas_internacionales`: Saldo de la reserva internacional, en millones de dólares.
    - `consultar_serie_sie`: Cualquier otra serie del catálogo SIE por su identificador.
+6. DATOS OFICIALES DEL INEGI (INEGI MCP): población, empleo, economía y negocios de México
+   por país, estado o municipio (acepta nombres como "Naucalpan" o "Jalisco").
+   - `consultar_indicador`: Población total, hombres, mujeres, % indígena, desempleo, PIB, IGAE,
+     inflación del INPC. Usa claves como POBLACION_TOTAL, POBLACION_MUJERES, POBLACION_HOMBRES,
+     TASA_DESOCUPACION, PIB_REAL, IGAE (lista completa con `indicadores_clave`).
+   - `comparar_areas`: El mismo indicador en varios estados o municipios.
+   - `buscar_municipio`: Clave de un municipio por su nombre.
+   - `contar_negocios`: Cuántos negocios de un giro hay (ej: tortillerías en Naucalpan).
+   - `buscar_negocios`: Lista de negocios con dirección y teléfono.
+   - `negocios_cercanos`: Negocios alrededor de unas coordenadas (latitud, longitud).
 
 REGLAS CRÍTICAS DE EJECUCIÓN (¡MUY IMPORTANTE!):
 1. PROHIBIDO USAR HERRAMIENTAS EN SALUDOS Y CHARLA INFORMAL: Si el usuario únicamente saluda (ej: "Hola", "Buenas", "Qué onda", "¿Cómo estás?"), agradece, o bromea, NUNCA invoques herramientas. NUNCA abras el navegador ni navegues a example.com ni a ningún sitio web sin una orden explícita del usuario. Responde de forma amable, simpática y conversacional preguntando en qué le puedes colaborar.
 2. ARCHIVOS LOCALES: Para consultar archivos, directorios o carpetas en la computadora, USA EXCLUSIVAMENTE 'listar_archivos' (o 'ejecutar_comando'). NUNCA uses herramientas del navegador ('browser_*') para revisar archivos locales.
 3. DATOS ECONÓMICOS DE MÉXICO: Para tipo de cambio, inflación, UDIS, tasas de interés o reservas internacionales, USA SIEMPRE las herramientas de Banxico. NUNCA uses 'buscar_en_internet' ni 'browser_*' para esos datos: Banxico es la fuente primaria y devuelve la cifra oficial con su fecha de corte y el identificador de la serie. Al responder, menciona siempre la fecha y la serie.
-4. EJECUCIÓN DIRECTA: NUNCA le pidas al usuario que ejecute la herramienta ni escribas el bloque JSON {"name": ...} como texto. Invoca la herramienta directamente para que se ejecute de inmediato cuando la tarea realmente lo requiera.
-5. Responde de forma concisa, directa y en español a Iñaki tras ejecutar las herramientas."""
+4. POBLACIÓN, EMPLEO Y NEGOCIOS DE MÉXICO: Para cuánta gente vive en un lugar, cuántos hombres o
+   mujeres hay, desempleo, PIB o cuántos negocios hay de algo, USA SIEMPRE las herramientas del
+   INEGI. SÍ tienes esos datos, incluso por municipio. NUNCA digas que no tienes acceso a ellos.
+   Al responder, menciona el periodo y la fuente que devuelve la herramienta.
+5. EJECUCIÓN DIRECTA: NUNCA le pidas al usuario que ejecute la herramienta ni escribas el bloque JSON {"name": ...} como texto. Invoca la herramienta directamente para que se ejecute de inmediato cuando la tarea realmente lo requiera.
+6. Responde de forma concisa, directa y en español a Iñaki tras ejecutar las herramientas."""
 
 
 def obtener_system_prompt_gordito() -> str:
@@ -1524,7 +1682,16 @@ def generar_prompt_sintesis(ultimo_mensaje_usuario: str, herramientas_ejecutadas
     es_web = any(h in herramientas_set for h in [
         "buscar_en_internet", "leer_pagina_web"
     ])
+    es_inegi = bool(herramientas_set & INEGI_TOOLS)
 
+    if es_inegi:
+        return (
+            f"Responde a Iñaki en español, en una o dos oraciones, a su consulta: '{ultimo_mensaje_usuario}'. "
+            f"El resultado del INEGI trae un campo \"resumen\" con la cifra, el periodo y la fuente ya "
+            f"redactados: úsalo tal cual, copiando la cifra y el año exactos. No conviertas unidades, "
+            f"no cambies el año, no expliques siglas que no aparezcan en el resultado y no emitas JSON. "
+            f"Si el resultado es una lista de negocios, menciona los primeros por nombre y dirección."
+        )
     if es_banxico:
         return (
             f"Por favor responde a Iñaki en español de forma conversacional, clara y concisa "
