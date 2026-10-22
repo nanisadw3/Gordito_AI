@@ -1473,8 +1473,9 @@ def inferir_llamada_inegi_fallback(texto_usuario: str) -> tuple[str | None, dict
                     return "comparar_areas", {"indicador": indicador, "areas": areas}
             args = {"indicador": indicador}
             area = _area_de_la_pregunta(txt)
-            # El desempleo, el PIB y el IGAE solo existen a nivel nacional.
-            if area and indicador not in ("TASA_DESOCUPACION", "PIB_REAL", "IGAE"):
+            # El PIB y el IGAE solo existen a nivel nacional; el desempleo por estado o municipio
+            # lo resuelve mcp-inegi (>= 0.2.2) con el dato estatal.
+            if area and indicador not in ("PIB_REAL", "IGAE"):
                 args["area"] = area
             return "consultar_indicador", args
 
